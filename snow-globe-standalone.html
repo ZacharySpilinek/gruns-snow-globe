@@ -1,0 +1,682 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><style>body{margin:0}</style></head><body>
+<title>Window Shake Snow Globe</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600&family=Inter:wght@400;500&family=JetBrains+Mono:wght@400&display=swap">
+<style>
+/* Layout: one screen, globe centered, a quiet caption strip below. Deliberately single dark theme: a winter night. */
+:root {
+  --night: #0b1424;
+  --night-2: #13233d;
+  --frost: #e8eef7;
+  --frost-dim: #93a3bb;
+  --ember: #f2b65a;
+  --line: #24365a;
+  --display: "Bricolage Grotesque", "Avenir Next", system-ui, sans-serif;
+  --body: "Inter", system-ui, -apple-system, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  background: radial-gradient(120% 80% at 50% 10%, var(--night-2), var(--night) 70%);
+  background-color: var(--night);
+  color: var(--frost);
+  font-family: var(--body);
+  overflow: hidden;
+}
+.wrap {
+  height: 100%;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 12px;
+  box-sizing: border-box;
+}
+h1 {
+  font-family: var(--display); font-weight: 600; font-size: clamp(1.25rem, 3.4vw, 1.75rem);
+  margin: 0; letter-spacing: -0.01em; text-wrap: balance; text-align: center;
+}
+.hint { margin: 0; color: var(--frost-dim); font-size: 0.9rem; text-align: center; max-width: 52ch; line-height: 1.45; }
+canvas { display: block; touch-action: none; cursor: grab; max-width: 100%; }
+canvas:active { cursor: grabbing; }
+.bar {
+  display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; justify-content: center;
+  font-family: var(--mono); font-size: 0.78rem; color: var(--frost-dim);
+  font-variant-numeric: tabular-nums;
+}
+.bar b { color: var(--frost); font-weight: 400; }
+.meter { width: 90px; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.meter i { display: block; height: 100%; width: 0; background: var(--ember); }
+button {
+  font: 500 0.8rem var(--body); color: var(--night); background: var(--frost);
+  border: 0; border-radius: 999px; padding: 6px 14px; cursor: pointer;
+}
+button:focus-visible { outline: 2px solid var(--ember); outline-offset: 2px; }
+.modes { display: flex; gap: 8px; align-items: center; }
+.modes[hidden] { display: none; }
+.seg { display: inline-flex; gap: 2px; padding: 2px; border-radius: 999px; background: var(--line); }
+.seg button { background: transparent; color: var(--frost-dim); padding: 4px 12px; }
+.seg button:hover { color: var(--frost); }
+.seg button[aria-pressed="true"] { background: var(--frost); color: var(--night); }
+.note { margin: 0; font-size: 0.75rem; color: var(--frost-dim); text-align: center; max-width: 60ch; line-height: 1.4; }
+</style>
+
+<div class="wrap">
+  <h1 id="title">Grab the window and shake it</h1>
+  <p class="hint" id="hint">Make the browser window small, then drag it around quickly. The page reads the window's screen position every frame and throws the snow the opposite way. You can also fling the globe itself with your mouse or finger.</p>
+  <canvas id="globe" aria-label="Snow globe with a cabin and pine trees" role="img"></canvas>
+  <div class="bar">
+    <span class="modes" id="modes" hidden>shake with
+      <span class="seg" role="group" aria-label="What shakes the globe">
+        <button id="modeWindow" type="button" aria-pressed="true">Window</button>
+        <button id="modeMouse" type="button" aria-pressed="false">Mouse</button>
+      </span>
+    </span>
+    <span><span id="posLabel">window</span> <b id="pos">0, 0</b></span>
+    <span>speed <b id="spd">0</b> px/s</span>
+    <span style="display:flex;gap:8px;align-items:center">shake <span class="meter"><i id="meter"></i></span></span>
+    <button id="shake" type="button">Shake</button>
+    <button id="motion" type="button" hidden>Use phone motion</button>
+  </div>
+  <p class="note" id="note">If "window" stays at 0, 0 while you drag, your browser hides the window position (Linux on Wayland and some privacy modes do this). Fling the globe instead.</p>
+</div>
+
+<script>
+(() => {
+  const cv = document.getElementById('globe');
+  const ctx = cv.getContext('2d');
+  const posEl = document.getElementById('pos'), spdEl = document.getElementById('spd'), meterEl = document.getElementById('meter');
+
+  let size = 400, R = 180, cx = 200, cy = 190, dpr = 1;
+  const flakes = [];
+  const N = 420;
+
+  function groundY(x) {
+    // snow mound inside the globe, clipped to the glass
+    const mound = R * 0.5 + (x / R) * (x / R) * R * 0.12 - Math.cos(x / R * 3) * R * 0.02;
+    const glass = Math.sqrt(Math.max(0, R * R - x * x)) - 3;
+    return Math.min(mound, glass);
+  }
+
+  function resize() {
+    const wrap = cv.parentElement;
+    const avail = Math.min(wrap.clientWidth - 32, window.innerHeight - 230, 560);
+    size = Math.max(220, avail);
+    dpr = window.devicePixelRatio || 1;
+    cv.style.width = size + 'px';
+    cv.style.height = size * 1.08 + 'px';
+    cv.width = Math.round(size * dpr);
+    cv.height = Math.round(size * 1.08 * dpr);
+    const oldR = R;
+    R = size * 0.44; cx = size / 2; cy = size * 0.47;
+    const k = R / oldR;
+    for (const f of flakes) { f.x *= k; f.y *= k; }
+  }
+
+  function seed() {
+    for (let i = 0; i < N; i++) {
+      const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * R * 0.9;
+      const r = 0.8 + Math.random() * Math.random() * 2.6;
+      flakes.push({
+        x: Math.cos(a) * d, y: Math.sin(a) * d - R * 0.1,
+        vx: 0, vy: 0, r,
+        k: 0.6 + Math.random() * 0.8,          // how far the sloshing water carries it
+        w: 0.05 + r * 0.021,                   // sinking speed in R per second (bigger flakes sink faster)
+        tau: 0.06 + r * 0.025,                 // seconds to pick up the water's speed (bigger flakes lag more)
+        // its own tumbling path: two slow wobbles at random rates
+        f1: 1.5 + Math.random() * 2, f2: 1.5 + Math.random() * 2, p1: Math.random() * 7, p2: Math.random() * 7,
+        a: 0.55 + Math.random() * 0.45
+      });
+    }
+  }
+
+  // --- motion sources. Each reports how fast the globe is moving across the screen (px/s): the browser
+  // window being dragged, the globe being flung with a finger or mouse, the phone itself, and the Shake button.
+  let lastSX = screenX, lastSY = screenY;
+  let winVX = 0, winVY = 0, prevVX = 0, prevVY = 0;
+  let drag = null, offX = 0, offY = 0, offVX = 0, offVY = 0, lastOffX = 0, lastOffY = 0;
+  let energy = 0, kickVX = 0, kickVY = 0;
+
+  cv.addEventListener('pointerdown', e => {
+    cv.setPointerCapture(e.pointerId);
+    drag = { x: e.clientX - offX, y: e.clientY - offY };
+  });
+  cv.addEventListener('pointermove', e => {
+    if (!drag) return;
+    offX = e.clientX - drag.x; offY = e.clientY - drag.y;
+  });
+  const end = () => { drag = null; };
+  cv.addEventListener('pointerup', end);
+  cv.addEventListener('pointercancel', end);
+  document.getElementById('shake').addEventListener('click', () => {
+    // a sharp jolt in a random, mostly downward direction (which throws the snow up), and a full stir
+    const a = Math.random() * Math.PI * 2;
+    kickVX = Math.cos(a) * 900; kickVY = Math.sin(a) * 500 + 900;
+    energy = 1;
+  });
+
+  // --- phone motion ---
+  // Shaking: the accelerometer's linear acceleration is integrated into the phone's velocity.
+  // Tilting: the gravity direction, projected onto the screen, sets which way the flakes fall.
+  //
+  // Two things to correct for:
+  //  1. Sign. The spec (and Android) report accelerationIncludingGravity as +9.8 "up"; iOS Safari reports
+  //     the opposite on every axis, for `acceleration` too. deviceorientation's beta/gamma agree across
+  //     browsers, so we compare the two and learn the sign at runtime instead of sniffing the user agent.
+  //  2. Screen rotation. Sensor axes stay fixed to the phone's natural (portrait) orientation; when the
+  //     page rotates to landscape, the vectors have to be rotated to match the screen.
+  let lastMotionT = 0, gotMotion = false;
+  let phoneVX = 0, phoneVY = 0;        // the phone's velocity across the screen, m/s
+  let stillFor = 0;                    // seconds the phone has read as motionless
+  const PHONE_PX = 1000;               // globe px/s per m/s of phone speed
+  let gravX = 0, gravY = 1;            // gravity on the screen, in g (screen y points down)
+  let upDev = null;                    // "up" in the device frame, from deviceorientation
+  let signVote = 0;                    // > 0: browser follows the spec, < 0: inverted (iOS)
+  let lpX = 0, lpY = 0, lpZ = 0, lpInit = false;
+  const D2R = Math.PI / 180, G = 9.81;
+  const motionBtn = document.getElementById('motion'), noteEl = document.getElementById('note');
+  const touchy = window.matchMedia && matchMedia('(pointer: coarse)').matches;
+  if ('DeviceMotionEvent' in window && touchy) {
+    motionBtn.hidden = false;
+    noteEl.textContent = 'On a phone: tap "Use phone motion", then tilt or shake the phone. You can also fling the globe with your finger.';
+  }
+
+  function screenAngle() {
+    const o = screen.orientation;
+    const a = o && typeof o.angle === 'number' ? o.angle : (window.orientation || 0);
+    return (((a % 360) + 360) % 360) * D2R;
+  }
+  // device frame (x right, y toward the top of the phone) -> screen frame (x right, y down)
+  function toScreen(x, y, th) {
+    const c = Math.cos(th), s = Math.sin(th);
+    return [x * c - y * s, -(x * s + y * c)];
+  }
+
+  function onOrientation(e) {
+    if (e.beta == null || e.gamma == null) return;
+    const b = e.beta * D2R, gm = e.gamma * D2R;
+    // world "up" expressed in the device frame (third row of the Z-X'-Y'' rotation matrix; alpha drops out)
+    upDev = [-Math.cos(b) * Math.sin(gm), Math.sin(b), Math.cos(b) * Math.cos(gm)];
+  }
+
+  function onMotion(e) {
+    const ig = e.accelerationIncludingGravity, a = e.acceleration;
+    if (!ig || ig.x == null) return;
+    const now = performance.now();
+    const dt = lastMotionT ? Math.min((now - lastMotionT) / 1000, 0.1) : 0.016;
+    lastMotionT = now;
+    gotMotion = true;
+
+    // split the reading into gravity (g*) and linear acceleration (l*), still in the browser's own sign
+    let gx, gy, gz, lx, ly;
+    if (a && a.x != null) {
+      lx = a.x; ly = a.y;
+      gx = ig.x - a.x; gy = ig.y - a.y; gz = ig.z - a.z;
+    } else {
+      // no gyroscope, so no separate linear acceleration: low-pass the raw reading to estimate gravity
+      const k = lpInit ? 1 - Math.exp(-dt / 0.15) : 1;
+      lpInit = true;
+      lpX += (ig.x - lpX) * k; lpY += (ig.y - lpY) * k; lpZ += (ig.z - lpZ) * k;
+      gx = lpX; gy = lpY; gz = lpZ;
+      lx = ig.x - lpX; ly = ig.y - lpY;
+    }
+
+    if (upDev) {
+      // following the spec, gravity reads as +up, so the dot product with up is positive
+      const dot = gx * upDev[0] + gy * upDev[1] + gz * upDev[2];
+      signVote = Math.max(-5, Math.min(5, signVote + dot * dt));
+    } else if (signVote === 0) {
+      // no orientation data yet: assume the usual starting pose (screen up or facing you, top of phone up)
+      signVote = gy + gz >= 0 ? 1e-3 : -1e-3;
+    }
+    const sgn = signVote < 0 ? -1 : 1;
+    const th = screenAngle();
+
+    // tilt: gravity points opposite the spec-convention reading
+    [gravX, gravY] = toScreen(-sgn * gx / G, -sgn * gy / G, th);
+
+    // shake: integrate the phone's linear acceleration (m/s², screen axes) into its velocity. The flakes
+    // respond to velocity, not acceleration: a jerk speeds up and then stops, so its acceleration points one
+    // way and then the other, but its velocity points one way the whole time.
+    const [mx, my] = toScreen(sgn * lx, sgn * ly, th);
+    stillFor = Math.hypot(mx, my) < 0.6 ? stillFor + dt : 0;
+    if (stillFor > 0.1) {
+      // the phone has come to rest, so its velocity is zero: throw away whatever the integration drifted to
+      const k = Math.exp(-dt / 0.06);
+      phoneVX *= k; phoneVY *= k;
+    } else {
+      // a leak keeps sensor bias from piling up during a long shake
+      const leak = Math.exp(-dt / 0.7);
+      phoneVX = phoneVX * leak + mx * dt;
+      phoneVY = phoneVY * leak + my * dt;
+      const v = Math.hypot(phoneVX, phoneVY);
+      if (v > 2.5) { phoneVX *= 2.5 / v; phoneVY *= 2.5 / v; } // faster than a hand moves: that's drift
+    }
+  }
+
+  motionBtn.addEventListener('click', async () => {
+    try {
+      // iOS needs a permission prompt for each API. Ask for both in the same tap; motion is the one we need.
+      const ask = name => (window[name] && typeof window[name].requestPermission === 'function')
+        ? window[name].requestPermission() : Promise.resolve('granted');
+      const [m] = await Promise.allSettled([ask('DeviceMotionEvent'), ask('DeviceOrientationEvent')]);
+      if (m.status !== 'fulfilled' || m.value !== 'granted') throw new Error('denied');
+      window.addEventListener('devicemotion', onMotion);
+      window.addEventListener('deviceorientation', onOrientation);
+      motionBtn.textContent = 'Motion on';
+      motionBtn.disabled = true;
+      setTimeout(() => {
+        if (!gotMotion) {
+          noteEl.textContent = 'No motion data arrived. This viewer blocks the motion sensor, so open the standalone copy of this page in your phone’s browser. Flinging the globe still works here.';
+          motionBtn.textContent = 'Motion blocked';
+        }
+      }, 1500);
+    } catch {
+      noteEl.textContent = 'Motion access was refused. Flinging the globe with your finger still works.';
+      motionBtn.textContent = 'Motion blocked';
+      motionBtn.disabled = true;
+    }
+  });
+
+  // --- desktop: shake the browser window, or stir with the mouse ---
+  // In mouse mode the window's movement is ignored, and the cursor acts like a fingertip dipped in the
+  // water inside the globe (see "the cursor in the water" below).
+  let useMouse = false;
+  const mouse = { on: false, x: 0, y: 0, t: 0, seen: 0, vx: 0, vy: 0 };
+  window.addEventListener('pointermove', e => {
+    if (e.pointerType === 'touch') return;
+    const t = e.timeStamp / 1000;
+    mouse.seen = performance.now();
+    if (!mouse.on) { mouse.on = true; mouse.x = e.clientX; mouse.y = e.clientY; mouse.t = t; return; }
+    const dt = t - mouse.t;
+    if (dt < 0.002) return;            // too close together to time; fold this move into the next one
+    // velocity from the events' own timestamps, so it doesn't depend on the display's frame rate
+    let vx = (e.clientX - mouse.x) / dt, vy = (e.clientY - mouse.y) / dt;
+    const v = Math.hypot(vx, vy);
+    if (v > 8000) { vx *= 8000 / v; vy *= 8000 / v; }
+    const k = 1 - Math.exp(-dt / 0.035);
+    mouse.vx += (vx - mouse.vx) * k; mouse.vy += (vy - mouse.vy) * k;
+    mouse.x = e.clientX; mouse.y = e.clientY; mouse.t = t;
+  });
+  // the cursor left the window: forget where it was, so coming back in somewhere else isn't a jolt
+  window.addEventListener('pointerout', e => {
+    if (!e.relatedTarget && e.pointerType !== 'touch') mouse.on = false;
+  });
+
+  const titleEl = document.getElementById('title'), hintEl = document.getElementById('hint');
+  const posLabel = document.getElementById('posLabel'), modesEl = document.getElementById('modes');
+  const modeWindowBtn = document.getElementById('modeWindow'), modeMouseBtn = document.getElementById('modeMouse');
+  const MODE_TEXT = {
+    window: { title: titleEl.textContent, hint: hintEl.textContent },
+    mouse: {
+      title: 'Stir it with your mouse',
+      hint: 'Move the mouse through the globe, even slowly. The snow flows around the cursor and swirls in its wake, and sweeping across the snow bank kicks it up. You can still fling the globe by dragging it.',
+    },
+  };
+  function setMode(m) {
+    useMouse = m === 'mouse';
+    titleEl.textContent = MODE_TEXT[m].title;
+    hintEl.textContent = MODE_TEXT[m].hint;
+    posLabel.textContent = m;
+    noteEl.hidden = useMouse;          // the note is about reading the window's position
+    modeWindowBtn.setAttribute('aria-pressed', String(!useMouse));
+    modeMouseBtn.setAttribute('aria-pressed', String(useMouse));
+    mouse.vx = mouse.vy = 0;
+    try { localStorage.setItem('snow-globe-shake-with', m); } catch {}
+  }
+  if (window.matchMedia && matchMedia('(hover: hover) and (pointer: fine)').matches) {
+    modesEl.hidden = false;
+    modeWindowBtn.addEventListener('click', () => setMode('window'));
+    modeMouseBtn.addEventListener('click', () => setMode('mouse'));
+    let saved = null;
+    try { saved = localStorage.getItem('snow-globe-shake-with'); } catch {}
+    if (saved === 'mouse') setMode('mouse');
+  }
+
+  // --- the water ---
+  // Slow eddies: the curl of a few drifting waves, damped to zero at the glass so the flow runs along the
+  // glass instead of into it. A curl field is divergence-free, so it stirs the flakes without bunching them.
+  const MODES = [[2.2, 1.1, 0.7], [-1.3, 2.6, -0.9], [3.1, -1.6, 1.1], [-2.4, -2.9, -0.6], [4.3, 2.0, 1.3]];
+  const modeInv = MODES.map(([kx, ky]) => 1 / Math.hypot(kx, ky));
+  const modePh = MODES.map((_, i) => i * 1.9);
+  const EDDY_NORM = 0.87;                // brings the field's average speed to 1
+  const eddy = [0, 0];
+  function eddyAt(x, y) {
+    const X = x / R, Y = y / R, W = 1 - X * X - Y * Y;
+    let n = 0, nx = 0, ny = 0;
+    for (let i = 0; i < MODES.length; i++) {
+      const th = MODES[i][0] * X + MODES[i][1] * Y + modePh[i];
+      const c = Math.cos(th) * modeInv[i];
+      n += Math.sin(th) * modeInv[i]; nx += MODES[i][0] * c; ny += MODES[i][1] * c;
+    }
+    // stream function W·n; velocity = (∂/∂y, −∂/∂x)
+    eddy[0] = (W * ny - 2 * Y * n) * EDDY_NORM;
+    eddy[1] = -(W * nx - 2 * X * n) * EDDY_NORM;
+  }
+
+  // Applies a surface to a flake's `push` (its target velocity). (nx, ny) is the surface's inward normal:
+  // the part of the push going into the surface is dropped, and friction eats into the sideways part in
+  // proportion to how hard the push presses in. This is what stops flakes from skating up the curved glass.
+  const push = [0, 0];
+  function slide(nx, ny, mu) {
+    const vn = push[0] * nx + push[1] * ny;
+    if (vn <= 0) return;
+    const sx = push[0] - vn * nx, sy = push[1] - vn * ny, sl = Math.hypot(sx, sy);
+    const k = sl > 0 ? Math.max(0, 1 - mu * vn / sl) : 0;
+    push[0] = sx * k; push[1] = sy * k;
+  }
+
+  // --- the cursor in the water (mouse mode) ---
+  // The cursor acts like a fingertip in thick water. It drags a pocket of water along with it, the water at
+  // its sides curls back around it, and still water parts around it. As it moves it also sheds pairs of
+  // counter-rotating vortices from its sides, like a spoon dragged through tea; those drift on each other's
+  // flow, curl the wake up, then spread out and fade over a few seconds.
+  const MAX_BLOBS = 140;
+  const blobs = [];                    // vortices: {x, y, g: circulation (px²/s), s2: core size² (px²)}
+  const BX = new Float64Array(MAX_BLOBS), BY = new Float64Array(MAX_BLOBS), BG = new Float64Array(MAX_BLOBS);
+  const BS = new Float64Array(MAX_BLOBS), IX = new Float64Array(MAX_BLOBS), IY = new Float64Array(MAX_BLOBS);
+  let nB = 0, cur = null, lastCur = null, trail = 0;
+  const bflow = [0, 0];
+
+  // copy the vortices into flat arrays, each with its mirror image across the glass (the circle theorem),
+  // which keeps their flow from crossing the glass
+  function packBlobs(Rw) {
+    nB = blobs.length;
+    for (let j = 0; j < nB; j++) {
+      const b = blobs[j], d2 = b.x * b.x + b.y * b.y;
+      BX[j] = b.x; BY[j] = b.y; BG[j] = b.g / (2 * Math.PI); BS[j] = b.s2;
+      if (d2 < 1) { IX[j] = 1e7; IY[j] = 0; } else { IX[j] = b.x * Rw * Rw / d2; IY[j] = b.y * Rw * Rw / d2; }
+    }
+  }
+  // velocity the vortices (and their images) induce at (x, y), leaving out vortex `skip`
+  function blobFlow(x, y, skip) {
+    let ux = 0, uy = 0;
+    for (let j = 0; j < nB; j++) {
+      let dx, dy, f;
+      if (j !== skip) { dx = x - BX[j]; dy = y - BY[j]; f = BG[j] / (dx * dx + dy * dy + BS[j]); ux -= dy * f; uy += dx * f; }
+      dx = x - IX[j]; dy = y - IY[j]; f = BG[j] / (dx * dx + dy * dy + BS[j]); ux += dy * f; uy -= dx * f;
+    }
+    bflow[0] = ux; bflow[1] = uy;
+  }
+  function addBlob(x, y, g, size, Rw) {
+    if (x * x + y * y > (Rw - 2) * (Rw - 2)) return;
+    if (blobs.length >= MAX_BLOBS) blobs.shift();
+    blobs.push({ x, y, g, s2: size * size });
+  }
+  // shed a vortex pair every `core` px along the cursor's path, just behind it, one off each side where the
+  // dragged pocket curls back. Their strength grows with the cursor's speed, and their spin keeps a current
+  // running along the path after the cursor has gone.
+  function shed(p0, p1, speed, core, ell, Rw) {
+    const dx = p1.x - p0.x, dy = p1.y - p0.y, len = Math.hypot(dx, dy);
+    if (len < 1e-6) return;
+    if (len > R) { trail = 0; return; }  // a jump, not a stroke
+    const tx = dx / len, ty = dy / len, nx = -ty, ny = tx, g = 0.8 * speed * core;
+    let s = core - trail;
+    for (; s <= len; s += core) {
+      const bx = p0.x + tx * (s - 0.5 * ell), by = p0.y + ty * (s - 0.5 * ell);
+      addBlob(bx + nx * ell, by + ny * ell, g, 0.45 * ell, Rw);
+      addBlob(bx - nx * ell, by - ny * ell, -g, 0.45 * ell, Rw);
+    }
+    trail = len - (s - core);
+  }
+  function stepBlobs(dt, Rw) {
+    if (!blobs.length) { nB = 0; return; }
+    packBlobs(Rw);
+    for (let j = 0; j < nB; j++) {
+      blobFlow(BX[j], BY[j], j);
+      blobs[j].x += bflow[0] * dt; blobs[j].y += bflow[1] * dt;
+    }
+    const fade = Math.exp(-dt / 2), spread = 160 * dt;
+    for (let j = blobs.length - 1; j >= 0; j--) {
+      const b = blobs[j];
+      b.g *= fade; b.s2 += spread;
+      if (Math.abs(b.g) < 150 || b.x * b.x + b.y * b.y > Rw * Rw) blobs.splice(j, 1);
+    }
+    packBlobs(Rw);
+  }
+  // The pocket of water the cursor drags along: the cursor's own velocity right at the cursor, fading out
+  // over `ell`, with the water at its sides flowing back the other way (two little whirlpools travelling
+  // with it). It comes from the stream function ψ = (V × r)·G(r) with G a Gaussian, so it's divergence-free
+  // and doesn't bulldoze a heap of snow ahead of the cursor. How far a flake gets carried depends on how far
+  // the cursor travels past it, not how fast, so slow strokes stir as much as quick ones.
+  function cursorDrag(f, ell) {
+    const rx = f.x - cur.x, ry = f.y - cur.y, r2 = rx * rx + ry * ry, l2 = ell * ell;
+    if (r2 > 9 * l2) return;
+    // 0.6: flakes ride along for a moment, then the cursor slips past them and leaves them in its wake
+    // (closer to 1 and it would bulldoze a heap of snow along with it)
+    const G = 0.6 * Math.exp(-r2 / (2 * l2)), c = (cur.vx * ry - cur.vy * rx) / l2;
+    push[0] += G * (cur.vx - c * ry); push[1] += G * (cur.vy + c * rx);
+  }
+  // Bends a flake's whole `push` (sinking included) around the cursor as if the cursor were a small solid
+  // rod: potential flow past a cylinder, taken relative to the cursor's own motion. A still cursor parts the
+  // falling snow; flakes the cursor runs into are carried along and pushed out (up and around, never down
+  // into the snow bank, when the cursor is skimming it).
+  function aroundCursor(f, core, nearBank) {
+    const rx = f.x - cur.x, ry = f.y - cur.y, r2 = rx * rx + ry * ry, reach = 5 * core;
+    if (r2 > reach * reach) return;
+    const r = Math.sqrt(r2), ux = r > 1e-3 ? rx / r : 0, uy = r > 1e-3 ? ry / r : -1;
+    const fx = push[0] - cur.vx, fy = push[1] - cur.vy, fn = fx * ux + fy * uy;   // relative to the cursor
+    if (r >= core) {
+      const q = (core * core / r2) * (1 - r2 / (reach * reach));
+      push[0] -= q * (2 * fn * ux - fx); push[1] -= q * (2 * fn * uy - fy);
+    } else {
+      const k = r / core, out = (1 - k) * (2 * Math.hypot(cur.vx, cur.vy) + 3 * core);
+      push[0] = cur.vx + 2 * k * (fx - fn * ux) + ux * out;
+      push[1] = cur.vy + 2 * k * (fy - fn * uy) + (nearBank ? -Math.abs(uy) : uy) * out;
+    }
+  }
+
+  let lastT = performance.now();
+  function frame(t) {
+    const dt = Math.min(Math.max((t - lastT) / 1000, 1 / 240), 1 / 20);
+    lastT = t;
+
+    // spring the globe back when released
+    if (!drag) {
+      offVX += (-offX * 120 - offVX * 14) * dt; offVY += (-offY * 120 - offVY * 14) * dt;
+      offX += offVX * dt; offY += offVY * dt;
+    } else { offVX = offVY = 0; }
+
+    // how fast the globe is moving on screen, from every source (in mouse mode the window doesn't count)
+    const sx = screenX, sy = screenY;
+    const wdx = useMouse ? 0 : sx - lastSX, wdy = useMouse ? 0 : sy - lastSY;
+    let rawVX = (wdx + offX - lastOffX) / dt;
+    let rawVY = (wdy + offY - lastOffY) / dt;
+    lastSX = sx; lastSY = sy; lastOffX = offX; lastOffY = offY;
+    const rv = Math.hypot(rawVX, rawVY);
+    if (rv > 5000) { rawVX *= 5000 / rv; rawVY *= 5000 / rv; } // the window jumped (maximized, other monitor)
+    // smooth: window positions often arrive in uneven chunks
+    winVX += (rawVX - winVX) * 0.35; winVY += (rawVY - winVY) * 0.35;
+    const kd = Math.exp(-dt / 0.12);
+    kickVX *= kd; kickVY *= kd;
+    const VX = winVX + phoneVX * PHONE_PX + kickVX, VY = winVY + phoneVY * PHONE_PX + kickVY;
+
+    // every change in the globe's speed churns the water, and the churn dies down over a few seconds
+    energy = Math.min(1, energy * Math.exp(-dt / 2.2) + Math.hypot(VX - prevVX, VY - prevVY) / 9000);
+    prevVX = VX; prevVY = VY;
+
+    // mouse mode: where the cursor is in the globe's frame, and the wake it leaves behind
+    const Rin = R - 4, core = Math.max(9, R * 0.08), ell = core * 1.4;   // the cursor's size, and its pocket's
+    if (t - mouse.seen > 50) { const k = Math.exp(-dt / 0.04); mouse.vx *= k; mouse.vy *= k; } // stopped moving
+    cur = null;
+    if (useMouse && mouse.on && !drag) {     // (while dragging, the cursor stays put relative to the globe)
+      const rect = cv.getBoundingClientRect(), k = size / (rect.width || size);
+      const x = (mouse.x - rect.left) * k - cx - offX, y = (mouse.y - rect.top) * k - cy - offY;
+      if (x * x + y * y < Rin * Rin) cur = { x, y, vx: mouse.vx * k - offVX, vy: mouse.vy * k - offVY };
+    }
+    if (cur && lastCur) {
+      const sp = Math.hypot(cur.vx, cur.vy);
+      shed(lastCur, cur, sp, core, ell, Rin);
+      // gentle strokes stay local; frantic stirring churns the whole globe
+      energy = Math.min(1, energy + Math.min(1, (sp / (R * 6)) ** 2) * dt);
+    } else trail = 0;
+    lastCur = cur;
+    stepBlobs(dt, Rin);
+
+    // The water lags behind the glass, so relative to the globe it flows opposite the globe's velocity.
+    // Moving right sends the snow left, and when the globe stops, the slosh stops too. Once the water is
+    // churning, the eddies take over and the slosh matters less.
+    const lag = 0.45 * (1 - 0.6 * energy);
+    let ux = -lag * VX, uy = -lag * VY;
+    const um = Math.hypot(ux, uy), uMax = R * 4;
+    if (um > uMax) { ux *= uMax / um; uy *= uMax / um; }
+    for (let i = 0; i < MODES.length; i++) modePh[i] += MODES[i][2] * (0.4 + 1.6 * energy) * dt;
+
+    // --- physics, in the globe's frame
+    // a single jerk only ruffles the water; it takes real shaking to whip up a blizzard
+    const churn = energy * Math.sqrt(energy);
+    const swirl = churn * R * 1.4, grip = R * 0.35;
+    const flutter = R * (0.02 + 0.8 * churn), ts = t / 1000;
+    for (const f of flakes) {
+      // The water's velocity at this flake: the slosh plus the eddies, plus the flake's own tumbling, which
+      // keeps the snow a cloud instead of strands. The slosh fades out gradually toward the glass, so
+      // flakes slow down before they reach it instead of getting pressed flat against it.
+      const d = Math.hypot(f.x, f.y);
+      const open = Math.min(1, Math.max(0, (Rin - f.r - d) / (R * 0.35)));
+      eddyAt(f.x, f.y);
+      push[0] = ux * f.k * open + eddy[0] * swirl + Math.sin(f.f1 * ts + f.p1) * flutter;
+      push[1] = uy * f.k * open + eddy[1] * swirl + Math.sin(f.f2 * ts + f.p2) * flutter;
+
+      // mouse mode: the cursor's wake, and the pocket of water it drags along
+      if (nB) { blobFlow(f.x, f.y, -1); push[0] += bflow[0]; push[1] += bflow[1]; }
+      if (cur) cursorDrag(f, ell);
+
+      // snow lying on the bank stays put until the water runs past it fast enough, then gets lifted off
+      const onBank = f.y >= groundY(f.x) - 0.75;
+      let bx = 0, by = 1;
+      if (onBank) {
+        const slope = (groundY(f.x + 1) - groundY(f.x - 1)) / 2, l = Math.hypot(slope, 1);
+        bx = -slope / l; by = 1 / l;           // into the bank
+        const s = Math.hypot(push[0], push[1]);
+        const k = s > grip ? (s - grip) / s : 0, lift = s > grip ? 0.4 * (s - grip) : 0;
+        push[0] = push[0] * k - bx * lift; push[1] = push[1] * k - by * lift;
+      }
+
+      // sinking: along gravity, which follows the phone's tilt (straight down until motion is turned on)
+      push[0] += gravX * f.w * R; push[1] += gravY * f.w * R;
+
+      // mouse mode: everything, sinking included, flows around the cursor itself. Where the cursor brushes
+      // the snow bank, the water just above the snow wells up and kicks the snow into the cursor's wake,
+      // however gently it moves. (Snow lying there can't hold against it, so it skips the bank's grip.)
+      if (cur) {
+        const r = Math.hypot(f.x - cur.x, f.y - cur.y), reach = 2.5 * core;
+        const above = groundY(f.x) - f.y, layer = 2 * core;
+        aroundCursor(f, core, above < layer);
+        if (r < reach && above < layer) {
+          push[1] -= (1 - r / reach) ** 2 * (1 - above / layer) * (2.2 * Math.hypot(cur.vx, cur.vy) + 12);
+        }
+      }
+
+      // nothing pushes into the bank or the glass, and friction holds snow on gentle slopes
+      if (onBank) slide(bx, by, 0.6);
+      if (d > 0 && d >= Rin - f.r - 0.75) slide(f.x / d, f.y / d, 0.3);
+
+      // flakes are light, so they pick up the water's speed quickly
+      const a = 1 - Math.exp(-dt / f.tau);
+      f.vx += (push[0] - f.vx) * a; f.vy += (push[1] - f.vy) * a;
+      f.x += f.vx * dt; f.y += f.vy * dt;
+
+      // stay above the bank and inside the glass
+      const gy = groundY(f.x);
+      if (f.y > gy) f.y = gy;
+      const d2 = Math.hypot(f.x, f.y);
+      if (d2 > Rin - f.r) { const s = (Rin - f.r) / d2; f.x *= s; f.y *= s; }
+    }
+
+    draw(t);
+
+    posEl.textContent = useMouse ? Math.round(mouse.x) + ', ' + Math.round(mouse.y) : Math.round(sx) + ', ' + Math.round(sy);
+    spdEl.textContent = Math.round(useMouse ? Math.hypot(mouse.vx, mouse.vy) : Math.hypot(VX, VY)).toString().padStart(4, ' ');
+    meterEl.style.width = Math.round(energy * 100) + '%';
+    requestAnimationFrame(frame);
+  }
+
+  function tree(x, base, h, w) {
+    ctx.fillStyle = '#1f4a3a';
+    for (let i = 0; i < 3; i++) {
+      const top = base - h + i * h * 0.22, bw = w * (0.55 + i * 0.25);
+      ctx.beginPath();
+      ctx.moveTo(x, top);
+      ctx.lineTo(x - bw / 2, top + h * 0.42);
+      ctx.lineTo(x + bw / 2, top + h * 0.42);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.fillStyle = 'rgba(232,238,247,0.85)';
+    ctx.beginPath(); ctx.moveTo(x, base - h); ctx.lineTo(x - w * 0.14, base - h * 0.8); ctx.lineTo(x + w * 0.14, base - h * 0.8); ctx.fill();
+  }
+
+  function draw(t) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, size, size * 1.08);
+    ctx.save();
+    ctx.translate(cx + offX, cy + offY);
+
+    // base
+    const bt = R * 0.78, bb = R * 1.18;
+    const wood = ctx.createLinearGradient(0, bt, 0, bb);
+    wood.addColorStop(0, '#7a4a2c'); wood.addColorStop(1, '#3d2414');
+    ctx.fillStyle = wood;
+    ctx.beginPath();
+    ctx.moveTo(-R * 0.7, bt); ctx.lineTo(R * 0.7, bt);
+    ctx.quadraticCurveTo(R * 0.86, bb, R * 0.9, bb);
+    ctx.lineTo(-R * 0.9, bb); ctx.quadraticCurveTo(-R * 0.86, bb, -R * 0.7, bt);
+    ctx.fill();
+    ctx.fillStyle = '#b8873f';
+    ctx.fillRect(-R * 0.76, bt + (bb - bt) * 0.42, R * 1.52, 3);
+
+    // water
+    ctx.save();
+    ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.clip();
+    const water = ctx.createRadialGradient(-R * 0.3, -R * 0.4, R * 0.1, 0, 0, R);
+    water.addColorStop(0, '#2a4f7c'); water.addColorStop(1, '#0e1d36');
+    ctx.fillStyle = water; ctx.fillRect(-R, -R, R * 2, R * 2);
+
+    // scene
+    tree(-R * 0.52, R * 0.52, R * 0.6, R * 0.34);
+    tree(R * 0.55, R * 0.54, R * 0.5, R * 0.3);
+    tree(R * 0.34, R * 0.5, R * 0.36, R * 0.22);
+    // cabin
+    const hw = R * 0.22, hb = R * 0.5, hh = R * 0.2;
+    ctx.fillStyle = '#5b3a26'; ctx.fillRect(-hw, hb - hh, hw * 2, hh);
+    ctx.fillStyle = '#e8eef7';
+    ctx.beginPath(); ctx.moveTo(-hw * 1.2, hb - hh); ctx.lineTo(0, hb - hh - R * 0.17); ctx.lineTo(hw * 1.2, hb - hh); ctx.fill();
+    const glow = 0.8 + Math.sin(t * 0.004) * 0.08;
+    ctx.fillStyle = `rgba(242,182,90,${glow})`;
+    ctx.fillRect(-hw * 0.6, hb - hh * 0.72, hw * 0.42, hh * 0.38);
+    ctx.fillStyle = '#2c1a10'; ctx.fillRect(hw * 0.2, hb - hh * 0.75, hw * 0.4, hh * 0.75);
+    // snow mound
+    ctx.fillStyle = '#dfe8f3';
+    ctx.beginPath(); ctx.moveTo(-R, R);
+    for (let x = -R; x <= R; x += 4) ctx.lineTo(x, groundY(x) + 2);
+    ctx.lineTo(R, R); ctx.fill();
+
+    // flakes
+    for (const f of flakes) {
+      ctx.globalAlpha = f.a;
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath(); ctx.arc(f.x, f.y, f.r, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+    // glass
+    const shine = ctx.createLinearGradient(-R, -R, R * 0.2, R * 0.2);
+    shine.addColorStop(0, 'rgba(255,255,255,0.28)'); shine.addColorStop(0.5, 'rgba(255,255,255,0)');
+    ctx.fillStyle = shine; ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(255,255,255,0.45)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(-R * 0.08, -R * 0.08, R * 0.8, Math.PI * 1.08, Math.PI * 1.42); ctx.stroke();
+    ctx.strokeStyle = 'rgba(200,220,255,0.35)'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(0, 0, R, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+
+  resize(); seed();
+  window.addEventListener('resize', resize);
+  requestAnimationFrame(frame);
+})();
+</script>
+
+</body></html>
